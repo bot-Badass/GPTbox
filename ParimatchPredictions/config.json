@@ -1,0 +1,6 @@
+
+{
+    "input_file": "ParimatchPredictions\\data\\input\\past.csv",
+    "output_file": "ParimatchPredictions\\data\\output\\predictions.csv"
+}
+
