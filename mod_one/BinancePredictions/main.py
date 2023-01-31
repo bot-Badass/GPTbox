@@ -1,134 +1,177 @@
-
 import os
-from dotenv import load_dotenv
+import requests
+import time
+import json
 import pandas as pd
 import numpy as np
 import binance
+from dotenv import load_dotenv
+from sklearn.metrics import r2_score, mean_absolute_error
 from sklearn.preprocessing import MinMaxScaler
 from keras.models import Sequential
-from keras.layers import Dense, Dropout, LSTM, Flatten  # Add these two libraries to be imported
+from keras.layers import Dense, Dropout, LSTM, Flatten
 from keras.optimizers import Adam
-import matplotlib.pyplot as plt  # Add this library to be imported 
-import requests  # To request data from Binance API  # Added missing import statement 
-import json      # To format data retrieved from Binance API  # Added missing import statement
+import matplotlib.pyplot as plt
 
 load_dotenv()
-# url = 'https://api.binance.com/api/v1/klines?symbol='+BINANCE_TICKER+'&interval=1h'
-
 headers = {'X-MBX-APIKEY': os.getenv('BINANCE_API_KEY')}
 
+start = time.time()
 
-# Refactoring:
-class BinanceData: 
-    def __init__(self): 
-        # Initialize Binance API Keys 
+
+class BinanceData:
+    def __init__(self, ticker):
         self.client = binance.Client(os.getenv('BINANCE_API_KEY'), os.getenv('BINANCE_SECRET_KEY'))
-        # Initialize Binance Ticker 
-        self.ticker = self.client.get_ticker()
+        self.ticker = os.getenv('BINANCE_TICKER')
+        # print(self.ticker)
 
-    def retrieve_data(self, headers): 
-       
-        url = f"https://api.binance.com/api/v3/ticker/price?symbol={self.ticker}&interval=1h"
-        # In the retrieve_data() method, the URL was incorrect, so it needed to be corrected 
-        response = requests.get(url=url, headers=headers) 
-        data = response.json() 
-        print(data)
-        # Format data into a pandas DataFrame
-        self.df = pd.DataFrame(data) 
-        print(self.df)
+    def retrieve_data(self):
+        url = f"https://api.binance.com/api/v3/klines?symbol={self.ticker}&interval=1h&limit=500"
+        # print(url)
+        response = requests.get(url=url)
+        data = response.json()
+        # print(data)
+        self.df = pd.DataFrame(data, columns=['Open time', 'Open', 'High', 'Low', 'Close', 'Volume', 'Close time',
+                                              'Quote asset volume', 'Number of trades', 'Taker buy base asset volume',
+                                              'Taker buy quote asset volume', 'Ignore'])
+        self.df['Open time'] = pd.to_datetime(self.df['Open time'], unit='ms')
+        self.df.set_index('Open time', inplace=True)
+        self.df = self.df.astype(float)
 
-    def format_data(self): 
-        # Convert Timestamp column to datetime format  
-        self.df['Timestamp'] = pd.to_datetime(self.df['Timestamp'],unit='s')
-        # Converting columns to float format 
-        self.data[['Open', 'High', 'Low', 'Close']] = self.data[['Open','High','Low','Close']].astype(float)
+        # Check if the data has at least one sample
+        if self.df.shape[0] < 1:
+            raise ValueError("Data does not have at least one sample.")
 
-    def create_new_df(self):
-        # Create new DataFrame with only the 'Close' column 
-        close_df = self.df[['Close']] 
+    def preprocess_data(self):
+        close_df = self.df[['Close']]
+        close_df = close_df.iloc[::-1]
+        self.data = close_df.values
+        self.scaler = MinMaxScaler(feature_range=(0, 1))
+        self.scaled_data = self.scaler.fit_transform(self.data)
+        self.train_size = int(len(self.scaled_data) * 0.8)
+        self.train_data = self.scaled_data[0:self.train_size, :]
+        self.test_data = self.scaled_data[self.train_size:, :]
+        self.Xtrain, self.ytrain = [], []
+        for i in range(60, len(self.train_data)):
+            self.Xtrain.append(self.train_data[i - 60:i, 0])
+            self.ytrain.append(self.train_data[i, 0])
+        self.Xtrain, self.ytrain = np.array(self.Xtrain), np.array(self.ytrain)
+        self.Xtrain = np.reshape(self.Xtrain, (self.Xtrain.shape[0], self.Xtrain.shape[1], 1))
 
-    def reverse_df(self): 
-        # Reverse order of dataframe so row 0 is the oldest record and highest index is most recent record   
-        self.df.iloc[::-1]
 
-    def set_index(self): 
+class ModelBuilder:
+    def __init__(self, data, window_size=60):
+        self.data = data
+        self.window_size = window_size
+        self.model = self.build_model()
 
-        self.df.set_index('Timestamp', inplace=True) 
-
-    def preprocess_data(self):  
-        self.convert_to_numpy()  
-        self.create_train_and_test()  
-        self.scale_data()  
-
-class ModelBuilder:     
-    def __init__(self, Xtrain, ytrain): 
-        # self.model = Sequential() 
-        self.Xtrain = Xtrain
-        self.ytrain = ytrain
-        self.Xtrain_shape = Xtrain.shape[2] 
-        
-
-    def addLSTM(self, Xtrain, shape): 
-        self.model.add(LSTM(units=128, input_shape=(Xtrain.shape[1], shape)))
- 
-
-    def build_model(self): 
-        self.model = Sequential() 
-        self.addLSTM(self.Xtrain, self.Xtrain_shape)
-        
-
-    def addDropout(self, model):
-        # check if model is defined
-        if model == None:
-            return None
-
-        # define dropout layer 
-        dropout_layer = Dropout(rate=0.2)
-        model.add(dropout_layer)
+    def build_model(self):
+        model = Sequential()
+        model.add(LSTM(50, return_sequences=True, input_shape=(self.window_size, 1)))
+        model.add(LSTM(50))
+        model.add(Dense(1))
+        model.compile(loss='mean_squared_error', optimizer='adam')
         return model
-        
 
-    def compileNetwork(model, layers): 
-        if (model.layers[0].shape != layers[0] or model.layers[1].shape != layers[1]): 
-            print("Error: Network model does not match shape of parameters") 
-            return None 
-        else: 
-            model.compile(optimizer='sgd', loss='categorical_crossentropy', metrics=['accuracy']) 
-            return model
+    def train_model(self, Xtrain, ytrain, epochs=50, batch_size=32):
+        self.model.fit(Xtrain, ytrain, epochs=epochs, batch_size=batch_size, verbose=0)
 
 
-    def fitNetwork(model, layers):
-        # Check that the model and layers match in shape
-        if model.shape != layers.shape:
-            raise ValueError('Model and layers do not match')
+data = BinanceData('ticker')
+data.retrieve_data()
+data.preprocess_data()
 
-        # Fit the network with the given model and layers 
-        model.fit(layers)
-        
-        
+model_builder = ModelBuilder(data.scaled_data)
+model_builder.train_model(data.Xtrain, data.ytrain)
+print(model_builder.model.summary())
 
 
+def predict_profitability(self, model, test_data, scaler):
+    predictions = []
+    for i in range(60, len(test_data)):
+        Xtest = test_data[i - 60:i, 0]
+        Xtest = np.reshape(Xtest, (1, Xtest.shape[0], 1))
+        prediction = model.predict(Xtest)
+        prediction = scaler.inverse_transform(prediction)
+        predictions.append(prediction[0][0])
+    return predictions
 
 
-"""
-# def compileNetwork(self, optimizer, loss): 
-#     self.model.add(Dense(20, activation='relu', input_dim=10))  
-#     self.model.add(Dense(8, activation='relu'))  
-#     self.model.add(Dense(1, activation='sigmoid'))  
+def calculate_profitability(self, predictions, test_data):
+    profitability = []
+    for i in range(len(predictions)):
+        actual_price = test_data[i + 60, 0]
+        predicted_price = predictions[i]
+        if predicted_price > actual_price:
+            profit = (predicted_price - actual_price) / actual_price
+            profitability.append(profit)
+        else:
+            profitability.append(0)
+    return profitability
 
-#     self.model.compile(optimizer=optimizer, loss=loss)
-#     # The compileNetwork() method did not have a model defined with the correct shapes of layers to match those passed in as parameters 
-"""
 
-"""
-# def addLSTM(self, Xtrain, shape2): 
-        
-#     model = Sequential()  # define the model
-#     model.add(LSTM(units=50, return_sequences=True, input_shape=(Xtrain.shape[1], shape2)))  # add an LSTM layer with the given input shape  
-#     model.add(Dense(1))  # add a dense layer with one node as output
+def get_total_profit(self, profitability):
+    total_profit = sum(profitability)
 
-#     # compile the model
-#     model.compile(loss='mean_squared_error', optimizer=Adam(lr=0.001))
-#     # In the addLSTM() method, self.Xtrain and self.Xtrain.shape[2] were not defined, so it will not know what the input shape should be; this can be fixed by adding a parameter to init which sets Xtrain and Xtrain.shape[2] and then passing those into addLSTM as parameters 
-#     return model
-"""
+    return total_profit
+
+
+def get_average_profit(self, profitability):
+    average_profit = sum(profitability) / len(profitability)
+
+    return average_profit
+
+
+end = time.time()
+print("Total runtime: {:.2f} seconds".format(end-start))
+
+
+# Create a list of tickers
+tickers = ['BTCUSDT', 'ETHUSDT', 'XRPUSDT', 'LINKUSDT']
+
+for ticker in tickers:
+    # Create BinanceData and ModelBuilder objects for each ticker
+    bd = BinanceData(ticker)
+    bd.retrieve_data()
+    bd.preprocess_data()
+    mb = ModelBuilder(bd.scaled_data)
+
+    # Train and evaluate the model
+    mb.model.fit(bd.Xtrain, bd.ytrain, epochs=1, batch_size=32)
+    predictions = mb.model.predict(bd.Xtest)
+    predictions = bd.scaler.inverse_transform(predictions)
+    mae = mean_absolute_error(bd.ytest, predictions)
+    print(f'Mean Absolute Error for {ticker}: {mae}')
+
+    # Plot the results
+    plt.plot(bd.ytest, label='True')
+    plt.plot(predictions, label='Prediction')
+    plt.xlabel('Time')
+    plt.ylabel('Price')
+    plt.title(f'{ticker} Price Prediction')
+    plt.legend()
+    plt.show()
+
+
+# Trade algorithm
+def trade_algorithm(ytest, predictions):
+    current_price = ytest[0]
+    predicted_price = predictions[0][0]
+    shares = 100
+    cash = 1000
+    for i in range(1, len(ytest)):
+        current_price = ytest[i]
+        predicted_price = predictions[i][0]
+        if predicted_price > current_price:
+            # Buy shares
+            shares += cash / current_price
+            cash = 0
+        elif predicted_price < current_price:
+            # Sell shares
+            cash += shares * current_price
+            shares = 0
+    return cash + shares * current_price
+
+
+
+

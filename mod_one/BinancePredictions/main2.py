@@ -1,100 +1,105 @@
-# Example from https://medium.com/@neonforge/how-chatgpt-wrote-an-entire-python-code-for-binance-crypto-trading-bot-8e971f89b190
 
-
-from binance import Client
+import os
+import requests
+import time
 import pandas as pd
-import talib
+import numpy as np
+import binance
+from dotenv import load_dotenv
+from sklearn.metrics import r2_score, mean_absolute_error
+from sklearn.preprocessing import MinMaxScaler
+from keras.models import Sequential
+from keras.layers import Dense, Dropout, LSTM, Flatten
+from keras.optimizers import Adam
+import matplotlib.pyplot as plt
 
-# Replace with your Binance API key and secret
-api_key = '<your-api-key>'
-api_secret = '<your-api-secret>'
+load_dotenv()
+HEADERS = {'X-MBX-APIKEY': os.getenv('BINANCE_API_KEY')}
 
-# Initialize the Binance client
-client = Client(api_key, api_secret)
 
-def buy_order(symbol, quantity):
-    # Get the minimum notional value for the specified symbol
-    min_notional = client.get_min_notional(symbol=symbol)
+class BinanceData:
+    def __init__(self, ticker):
+        self.client = binance.Client(os.getenv('BINANCE_API_KEY'), os.getenv('BINANCE_SECRET_KEY'))
+        self.ticker = os.getenv('BINANCE_TICKER')
 
-    # Place a market buy order for the specified quantity of the symbol if the quantity is greater than or equal to the minimum notional value
-    if quantity >= min_notional:
-        order = client.order_market_buy(
-            symbol=symbol,
-            quantity=quantity
-        )
+    def retrieve_data(self):
+        url = f"https://api.binance.com/api/v3/klines?symbol={self.ticker}&interval=1h&limit=500"
+        response = requests.get(url=url)
+        data = response.json()
+        self.df = pd.DataFrame(data, columns=[
+            'Open time', 'Open', 'High', 'Low', 'Close', 'Volume',
+            'Close time', 'Quote asset volume', 'Number of trades',
+            'Taker buy base asset volume', 'Taker buy quote asset volume', 'Ignore'
+        ])
+        self.df['Open time'] = pd.to_datetime(self.df['Open time'], unit='ms')
+        self.df.set_index('Open time', inplace=True)
+        self.df = self.df.astype(float)
 
-        # Return the order ID
-        return order['id']
-    else:
-        print('Quantity must be greater than or equal to the minimum notional value of {} {}'.format(min_notional, symbol))
-        return None
+        if self.df.shape[0] < 1:
+            raise ValueError("Data does not have at least one sample.")
 
-def sell_order(symbol, quantity):
-    # Get the symbol information
-    symbol_info = client.get_symbol_info(symbol=symbol)
 
-    # Calculate the required chunk size
-    chunk_size = symbol_info['filters'][2]['stepSize']
+class Preprocessor(BinanceData):
+    def init(self, data):
+        self.data = data
+        self.scaler = MinMaxScaler(feature_range=(0, 1))
+        self.scaled_data = self.scaler.fit_transform(self.data)
+        self.train_size = int(len(self.scaled_data) * 0.8)
+        self.train_data = self.scaled_data[0:self.train_size, :]
+        self.test_data = self.scaled_data[self.train_size:, :]
 
-    # Adjust the quantity to the required chunk size if necessary
-    if quantity % chunk_size != 0:
-        quantity = int(quantity / chunk_size) * chunk_size
 
-    # Place a market sell order for the specified quantity of the symbol
-    order = client.order_market_sell(
-        symbol=symbol,
-        quantity=quantity
-    )
+class ModelBuilder:
+    def init(self, data, window_size=60):
+        self.data = data
+        self.window_size = window_size
+        self.model = self.build_model()
 
-    # Return the order ID
-    return order['id']
+    def build_model(self):
+        model = Sequential()
+        model.add(LSTM(50, return_sequences=True, input_shape=(self.window_size, 1)))
+        model.add(Dropout(0.2))
+        model.add(LSTM(100, return_sequences=False))
+        model.add(Dropout(0.2))
+        model.add(Dense(25, activation='relu'))
+        model.add(Dense(1, activation='linear'))
+        model.compile(loss='mean_squared_error', optimizer='adam')
 
-def check_order_status(symbol, order_id):
-    # Get the order details for the specified symbol and order ID
-    order = client.get_order(
-        symbol=symbol,
-        orderId=order_id
-    )
+        return model
 
-    # Print the order status
-    print('Order status: {}'.format(order['status']))
+    def fit_model(self, Xtrain, ytrain, epochs=1, batch_size=64):
+        self.model.fit(Xtrain, ytrain, epochs=epochs, batch_size=batch_size)
 
-def get_candles(symbol, period, interval):
-    # Get the candles data for the specified symbol, period, and interval
-    candles = client.get_klines(
-        symbol=symbol,
-        interval=interval,
-        limit=period
-    )
+    def predict(self, Xtest, batch_size=64):
+        return self.model.predict(Xtest, batch_size=batch_size)
 
-    # Create a Pandas DataFrame from the candles data
-    df = pd.DataFrame(candles, columns=[
-        'open_time',
-        'open',
-        'high',
-        'low',
-        'close',
-        'volume',
-        'close_time',
-        'quote_asset_volume',
-        'number_of_trades',
-        'taker_buy_base_asset_volume',
-        'taker_buy_quote_asset_volume',
-        'ignore'
-    ])
+    def evaluate_model(self, Xtest, ytest):
+        y_pred = self.model.predict(Xtest)
+        y_test_scaled = self.data.scaler.inverse_transform(ytest.reshape(-1, 1))
+        y_pred_scaled = self.data.scaler.inverse_transform(y_pred)
+        print("R2 Score: ", r2_score(y_test_scaled, y_pred_scaled))
+        print("Mean Absolute Error: ", mean_absolute_error(y_test_scaled, y_pred_scaled))
 
-    # Convert the column values to numerical values
-    df = df.apply(pd.to_numeric)
+    def plot_prediction(self, Xtest, ytest):
+        y_pred = self.model.predict(Xtest)
+        y_test_scaled = self.data.scaler.inverse_transform(ytest.reshape(-1, 1))
+        y_pred_scaled = self.data.scaler.inverse_transform(y_pred)
+        plt.plot(y_test_scaled, label='True Price')
+        plt.plot(y_pred_scaled, label='Predicted Price')
+        plt.title("Price prediction")
+        plt.xlabel("Time")
+        plt.ylabel("Price")
+        plt.legend(loc='best')
+        plt.show()
 
-    # Return the Pandas DataFrame
-    return df
 
-def get_rsi(df, length):
-    # Calculate the RSI
-    rsi = talib.RSI(df['close'], timeperiod=length)
-
-    # Create a Pandas DataFrame with the RSI values
-    rsi_df = pd.DataFrame(rsi, columns=['RSI'])
-
-    # Return the RSI DataFrame
-    return rsi_df
+if __name__ == '__main__':
+    bd = BinanceData('BTCUSDT')
+    bd.retrieve_data()
+    # bd.preprocess_data()
+    Preprocessor(bd)
+    Xtrain, Xtest, ytrain, ytest = bd.train_data, bd.test_data, bd.ytrain, bd.ytest
+    mb = ModelBuilder(bd)
+    mb.fit_model(Xtrain, ytrain, epochs=5)
+    mb.evaluate_model(Xtest, ytest)
+    mb.plot_prediction(Xtest, ytest)
